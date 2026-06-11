@@ -19,7 +19,6 @@ app.add_middleware(
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
-FFMPEG_DIR = os.path.dirname(FFMPEG_PATH)
 
 class URLRequest(BaseModel):
     url: str
@@ -52,7 +51,7 @@ async def transcrever(request: URLRequest):
                     "preferredcodec": "mp3",
                     "preferredquality": "64",
                 }],
-                "ffmpeg_location": FFMPEG_DIR,
+                "ffmpeg_location": FFMPEG_PATH,
                 "quiet": True,
                 "no_warnings": True,
                 "extract_flat": False,
