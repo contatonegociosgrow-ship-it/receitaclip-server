@@ -6,7 +6,7 @@ import httpx
 import os
 import tempfile
 import asyncio
-import shutil
+import imageio_ffmpeg
 
 app = FastAPI()
 
@@ -18,13 +18,18 @@ app.add_middleware(
 )
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
+FFMPEG_DIR = os.path.dirname(FFMPEG_PATH)
 
 class URLRequest(BaseModel):
     url: str
 
 @app.get("/")
 def health():
-    return {"status": "ReceitaClip server rodando"}
+    return {
+        "status": "ReceitaClip server rodando",
+        "ffmpeg": FFMPEG_PATH
+    }
 
 @app.post("/transcrever")
 async def transcrever(request: URLRequest):
@@ -39,12 +44,6 @@ async def transcrever(request: URLRequest):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            # Encontrar ffmpeg dinamicamente
-            ffmpeg_path = shutil.which("ffmpeg")
-            if not ffmpeg_path:
-                raise HTTPException(status_code=500, detail="ffmpeg não encontrado no servidor")
-            ffmpeg_dir = os.path.dirname(ffmpeg_path)
-
             ydl_opts = {
                 "format": "bestaudio/best",
                 "outtmpl": os.path.join(tmpdir, "audio.%(ext)s"),
@@ -53,7 +52,7 @@ async def transcrever(request: URLRequest):
                     "preferredcodec": "mp3",
                     "preferredquality": "64",
                 }],
-                "ffmpeg_location": ffmpeg_dir,
+                "ffmpeg_location": FFMPEG_DIR,
                 "quiet": True,
                 "no_warnings": True,
                 "extract_flat": False,
