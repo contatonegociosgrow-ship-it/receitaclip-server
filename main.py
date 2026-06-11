@@ -1,5 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from pydantic import BaseModel
 import yt_dlp
 import httpx
@@ -7,6 +8,7 @@ import os
 import tempfile
 import asyncio
 import imageio_ffmpeg
+import base64
 
 app = FastAPI()
 
@@ -55,6 +57,7 @@ async def transcrever(request: URLRequest):
                 "quiet": True,
                 "no_warnings": True,
                 "extract_flat": False,
+                "writethumbnail": True,
             }
 
             loop = asyncio.get_event_loop()
@@ -66,6 +69,16 @@ async def transcrever(request: URLRequest):
 
             audio_file = os.path.join(tmpdir, mp3_files[0])
 
+            # Tentar pegar thumbnail
+            thumbnail_base64 = None
+            img_extensions = [".jpg", ".jpeg", ".png", ".webp"]
+            for ext in img_extensions:
+                thumb_files = [f for f in os.listdir(tmpdir) if f.endswith(ext)]
+                if thumb_files:
+                    with open(os.path.join(tmpdir, thumb_files[0]), "rb") as img:
+                        thumbnail_base64 = f"data:image/jpeg;base64,{base64.b64encode(img.read()).decode()}"
+                    break
+
             file_size = os.path.getsize(audio_file)
             if file_size > 25 * 1024 * 1024:
                 raise HTTPException(status_code=422, detail="Vídeo muito longo. Use vídeos de até 10 minutos.")
@@ -75,6 +88,7 @@ async def transcrever(request: URLRequest):
             return {
                 "sucesso": True,
                 "transcricao": transcricao,
+                "thumbnail": thumbnail_base64,
                 "plataforma": _detectar_plataforma(url)
             }
 
@@ -82,6 +96,34 @@ async def transcrever(request: URLRequest):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Erro ao processar vídeo: {str(e)}")
+
+
+@app.post("/thumbnail")
+async def get_thumbnail(request: URLRequest):
+    url = request.url
+    try:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ydl_opts = {
+                "skip_download": True,
+                "writethumbnail": True,
+                "outtmpl": os.path.join(tmpdir, "thumb.%(ext)s"),
+                "quiet": True,
+            }
+
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: _download(url, ydl_opts))
+
+            img_extensions = [".jpg", ".jpeg", ".png", ".webp"]
+            for ext in img_extensions:
+                thumb_files = [f for f in os.listdir(tmpdir) if f.endswith(ext)]
+                if thumb_files:
+                    with open(os.path.join(tmpdir, thumb_files[0]), "rb") as img:
+                        b64 = base64.b64encode(img.read()).decode()
+                        return {"thumbnail": f"data:image/jpeg;base64,{b64}"}
+
+            return {"thumbnail": None}
+    except Exception as e:
+        return {"thumbnail": None, "erro": str(e)}
 
 
 def _download(url: str, opts: dict):
