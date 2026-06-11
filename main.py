@@ -6,6 +6,7 @@ import httpx
 import os
 import tempfile
 import asyncio
+import shutil
 
 app = FastAPI()
 
@@ -37,7 +38,12 @@ async def transcrever(request: URLRequest):
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            audio_path = os.path.join(tmpdir, "audio.mp3")
+
+            # Encontrar ffmpeg dinamicamente
+            ffmpeg_path = shutil.which("ffmpeg")
+            if not ffmpeg_path:
+                raise HTTPException(status_code=500, detail="ffmpeg não encontrado no servidor")
+            ffmpeg_dir = os.path.dirname(ffmpeg_path)
 
             ydl_opts = {
                 "format": "bestaudio/best",
@@ -47,6 +53,7 @@ async def transcrever(request: URLRequest):
                     "preferredcodec": "mp3",
                     "preferredquality": "64",
                 }],
+                "ffmpeg_location": ffmpeg_dir,
                 "quiet": True,
                 "no_warnings": True,
                 "extract_flat": False,
