@@ -4,3 +4,4 @@ yt-dlp
 httpx
 pydantic
 python-multipart
+imageio-ffmpeg
