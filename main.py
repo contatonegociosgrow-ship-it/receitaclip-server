@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
 from pydantic import BaseModel
 import yt_dlp
 import httpx
@@ -45,6 +44,9 @@ async def transcrever(request: URLRequest):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
 
+            # Primeiro tentar extrair info sem baixar
+            thumbnail_base64 = await _extrair_thumbnail(url, tmpdir)
+
             ydl_opts = {
                 "format": "bestaudio/best",
                 "outtmpl": os.path.join(tmpdir, "audio.%(ext)s"),
@@ -63,21 +65,21 @@ async def transcrever(request: URLRequest):
             loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, lambda: _download(url, ydl_opts))
 
+            # Tentar pegar thumbnail gerado pelo download
+            if not thumbnail_base64:
+                img_extensions = [".jpg", ".jpeg", ".png", ".webp"]
+                for ext in img_extensions:
+                    thumb_files = [f for f in os.listdir(tmpdir) if f.endswith(ext)]
+                    if thumb_files:
+                        with open(os.path.join(tmpdir, thumb_files[0]), "rb") as img:
+                            thumbnail_base64 = f"data:image/jpeg;base64,{base64.b64encode(img.read()).decode()}"
+                        break
+
             mp3_files = [f for f in os.listdir(tmpdir) if f.endswith(".mp3")]
             if not mp3_files:
                 raise HTTPException(status_code=422, detail="Não foi possível extrair o áudio deste vídeo")
 
             audio_file = os.path.join(tmpdir, mp3_files[0])
-
-            # Tentar pegar thumbnail
-            thumbnail_base64 = None
-            img_extensions = [".jpg", ".jpeg", ".png", ".webp"]
-            for ext in img_extensions:
-                thumb_files = [f for f in os.listdir(tmpdir) if f.endswith(ext)]
-                if thumb_files:
-                    with open(os.path.join(tmpdir, thumb_files[0]), "rb") as img:
-                        thumbnail_base64 = f"data:image/jpeg;base64,{base64.b64encode(img.read()).decode()}"
-                    break
 
             file_size = os.path.getsize(audio_file)
             if file_size > 25 * 1024 * 1024:
@@ -98,32 +100,49 @@ async def transcrever(request: URLRequest):
         raise HTTPException(status_code=500, detail=f"Erro ao processar vídeo: {str(e)}")
 
 
-@app.post("/thumbnail")
-async def get_thumbnail(request: URLRequest):
-    url = request.url
+async def _extrair_thumbnail(url: str, tmpdir: str) -> str | None:
+    """Tenta extrair thumbnail via info extraction antes do download completo"""
     try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            ydl_opts = {
-                "skip_download": True,
-                "writethumbnail": True,
-                "outtmpl": os.path.join(tmpdir, "thumb.%(ext)s"),
-                "quiet": True,
-            }
+        ydl_opts_info = {
+            "skip_download": True,
+            "writethumbnail": True,
+            "outtmpl": os.path.join(tmpdir, "thumb.%(ext)s"),
+            "quiet": True,
+            "no_warnings": True,
+        }
 
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: _download(url, ydl_opts))
+        loop = asyncio.get_event_loop()
+        info = await loop.run_in_executor(None, lambda: _get_info(url, ydl_opts_info))
 
-            img_extensions = [".jpg", ".jpeg", ".png", ".webp"]
-            for ext in img_extensions:
-                thumb_files = [f for f in os.listdir(tmpdir) if f.endswith(ext)]
-                if thumb_files:
-                    with open(os.path.join(tmpdir, thumb_files[0]), "rb") as img:
-                        b64 = base64.b64encode(img.read()).decode()
-                        return {"thumbnail": f"data:image/jpeg;base64,{b64}"}
+        # Tentar pegar thumbnail da info
+        if info and info.get('thumbnail'):
+            thumb_url = info['thumbnail']
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(thumb_url)
+                if response.status_code == 200:
+                    b64 = base64.b64encode(response.content).decode()
+                    return f"data:image/jpeg;base64,{b64}"
 
-            return {"thumbnail": None}
+        # Tentar arquivo escrito pelo writethumbnail
+        img_extensions = [".jpg", ".jpeg", ".png", ".webp"]
+        for ext in img_extensions:
+            thumb_files = [f for f in os.listdir(tmpdir) if f.startswith("thumb") and f.endswith(ext)]
+            if thumb_files:
+                with open(os.path.join(tmpdir, thumb_files[0]), "rb") as img:
+                    return f"data:image/jpeg;base64,{base64.b64encode(img.read()).decode()}"
+
     except Exception as e:
-        return {"thumbnail": None, "erro": str(e)}
+        print(f"Thumbnail extraction failed: {e}")
+
+    return None
+
+
+def _get_info(url: str, opts: dict):
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        try:
+            return ydl.extract_info(url, download=True)
+        except Exception:
+            return None
 
 
 def _download(url: str, opts: dict):
