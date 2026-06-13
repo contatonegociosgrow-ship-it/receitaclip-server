@@ -8,7 +8,6 @@ import tempfile
 import asyncio
 import imageio_ffmpeg
 import base64
-import json
 
 app = FastAPI()
 
@@ -38,6 +37,54 @@ def health():
     }
 
 
+@app.post("/metadata")
+async def get_metadata(request: URLRequest):
+    """Extrai título e descrição completa do vídeo sem baixar o áudio"""
+    url = request.url
+    try:
+        ydl_opts = {
+            "skip_download": True,
+            "quiet": True,
+            "no_warnings": True,
+        }
+        loop = asyncio.get_event_loop()
+        info = await loop.run_in_executor(
+            None,
+            lambda: _get_info(url, ydl_opts)
+        )
+        if not info:
+            return {
+                "titulo": "",
+                "descricao": "",
+                "canal": "",
+                "duracao": 0
+            }
+
+        titulo = info.get('title', '') or ''
+        descricao = info.get('description', '') or ''
+        canal = info.get('uploader', '') or ''
+        duracao = info.get('duration', 0) or 0
+
+        print(f"Metadata extraído — Título: {titulo}")
+        print(f"Descrição ({len(descricao)} chars): {descricao[:300]}")
+
+        return {
+            "titulo": titulo,
+            "descricao": descricao,
+            "canal": canal,
+            "duracao": duracao
+        }
+    except Exception as e:
+        print(f"Erro ao extrair metadados: {e}")
+        return {
+            "titulo": "",
+            "descricao": "",
+            "canal": "",
+            "duracao": 0,
+            "erro": str(e)
+        }
+
+
 @app.post("/transcrever")
 async def transcrever(request: URLRequest):
     url = request.url
@@ -51,7 +98,7 @@ async def transcrever(request: URLRequest):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            # Extrair metadados do vídeo (título e descrição)
+            # Extrair metadados do vídeo
             descricao_video = ""
             titulo_video = ""
             try:
@@ -69,7 +116,7 @@ async def transcrever(request: URLRequest):
                     descricao_video = info.get('description', '') or ''
                     titulo_video = info.get('title', '') or ''
                     print(f"Título: {titulo_video}")
-                    print(f"Descrição ({len(descricao_video)} chars): {descricao_video[:200]}")
+                    print(f"Descrição ({len(descricao_video)} chars)")
             except Exception as e:
                 print(f"Erro ao extrair metadados: {e}")
 
@@ -105,7 +152,7 @@ async def transcrever(request: URLRequest):
                             thumbnail_base64 = f"data:image/jpeg;base64,{base64.b64encode(img.read()).decode()}"
                         break
 
-            # Verificar se o MP3 foi gerado
+            # Verificar MP3
             mp3_files = [f for f in os.listdir(tmpdir) if f.endswith(".mp3")]
             if not mp3_files:
                 raise HTTPException(
@@ -115,7 +162,6 @@ async def transcrever(request: URLRequest):
 
             audio_file = os.path.join(tmpdir, mp3_files[0])
 
-            # Verificar tamanho
             file_size = os.path.getsize(audio_file)
             print(f"Tamanho do áudio: {file_size / 1024 / 1024:.1f}MB")
 
@@ -125,9 +171,9 @@ async def transcrever(request: URLRequest):
                     detail="Vídeo muito longo. Use vídeos de até 10 minutos."
                 )
 
-            # Transcrever com Whisper
+            # Transcrever
             transcricao = await _transcrever_groq(audio_file)
-            print(f"Transcrição ({len(transcricao)} chars): {transcricao[:300]}")
+            print(f"Transcrição ({len(transcricao)} chars): {transcricao[:200]}")
 
             return {
                 "sucesso": True,
@@ -148,8 +194,7 @@ async def transcrever(request: URLRequest):
         )
 
 
-async def _extrair_thumbnail(url: str, tmpdir: str) -> str | None:
-    """Tenta extrair thumbnail via info extraction"""
+async def _extrair_thumbnail(url: str, tmpdir: str):
     try:
         ydl_opts_info = {
             "skip_download": True,
@@ -165,7 +210,6 @@ async def _extrair_thumbnail(url: str, tmpdir: str) -> str | None:
             lambda: _get_info(url, ydl_opts_info)
         )
 
-        # Tentar pegar thumbnail da URL direta
         if info and info.get('thumbnail'):
             thumb_url = info['thumbnail']
             async with httpx.AsyncClient(timeout=15.0) as client:
@@ -174,7 +218,6 @@ async def _extrair_thumbnail(url: str, tmpdir: str) -> str | None:
                     b64 = base64.b64encode(response.content).decode()
                     return f"data:image/jpeg;base64,{b64}"
 
-        # Tentar arquivo gerado pelo writethumbnail
         img_extensions = [".jpg", ".jpeg", ".png", ".webp"]
         for ext in img_extensions:
             thumb_files = [
@@ -235,7 +278,6 @@ async def _transcrever_groq(audio_path: str) -> str:
             print(f"Erro Whisper: {response.text}")
             raise Exception(f"Erro no Whisper: {response.text}")
 
-        # verbose_json retorna objeto com campo "text"
         resultado = response.json()
         if isinstance(resultado, dict):
             return resultado.get('text', '')
