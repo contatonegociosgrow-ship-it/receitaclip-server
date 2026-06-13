@@ -22,6 +22,7 @@ app.add_middleware(
 )
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+YOUTUBE_API_KEY = os.environ.get("YOUTUBE_API_KEY")
 FFMPEG_PATH = imageio_ffmpeg.get_ffmpeg_exe()
 
 
@@ -29,18 +30,81 @@ class URLRequest(BaseModel):
     url: str
 
 
+def _extrair_video_id(url: str) -> str | None:
+    """Extrai o ID do vídeo do YouTube de qualquer formato de URL"""
+    import re
+    patterns = [
+        r'(?:v=|youtu\.be/)([^&?/\s]{11})',
+        r'(?:embed/)([^&?/\s]{11})',
+        r'(?:shorts/)([^&?/\s]{11})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, url)
+        if match:
+            return match.group(1)
+    return None
+
+
 @app.get("/")
 def health():
     return {
         "status": "ReceitaClip server rodando",
-        "ffmpeg": FFMPEG_PATH
+        "ffmpeg": FFMPEG_PATH,
+        "youtube_api": "configurada" if YOUTUBE_API_KEY else "não configurada"
     }
 
 
 @app.post("/metadata")
 async def get_metadata(request: URLRequest):
-    """Extrai título e descrição completa do vídeo sem baixar o áudio"""
+    """Extrai título e descrição completa do vídeo"""
     url = request.url
+
+    # Verificar se é YouTube
+    video_id = _extrair_video_id(url)
+    is_youtube = video_id is not None
+
+    if is_youtube and YOUTUBE_API_KEY:
+        # Usar YouTube Data API v3 — mais confiável
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(
+                    "https://www.googleapis.com/youtube/v3/videos",
+                    params={
+                        "id": video_id,
+                        "part": "snippet",
+                        "key": YOUTUBE_API_KEY
+                    }
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    items = data.get("items", [])
+
+                    if items:
+                        snippet = items[0].get("snippet", {})
+                        titulo = snippet.get("title", "")
+                        descricao = snippet.get("description", "")
+                        canal = snippet.get("channelTitle", "")
+
+                        print(f"YouTube API — Título: {titulo}")
+                        print(f"Descrição ({len(descricao)} chars): {descricao[:300]}")
+
+                        return {
+                            "titulo": titulo,
+                            "descricao": descricao,
+                            "canal": canal,
+                            "duracao": 0,
+                            "fonte": "youtube_api"
+                        }
+                    else:
+                        print("YouTube API — vídeo não encontrado")
+                else:
+                    print(f"YouTube API erro: {response.status_code} — {response.text}")
+
+        except Exception as e:
+            print(f"Erro YouTube API: {e}")
+
+    # Fallback: yt-dlp para outras plataformas ou se API falhar
     try:
         ydl_opts = {
             "skip_download": True,
@@ -60,22 +124,15 @@ async def get_metadata(request: URLRequest):
                 "duracao": 0
             }
 
-        titulo = info.get('title', '') or ''
-        descricao = info.get('description', '') or ''
-        canal = info.get('uploader', '') or ''
-        duracao = info.get('duration', 0) or 0
-
-        print(f"Metadata extraído — Título: {titulo}")
-        print(f"Descrição ({len(descricao)} chars): {descricao[:300]}")
-
         return {
-            "titulo": titulo,
-            "descricao": descricao,
-            "canal": canal,
-            "duracao": duracao
+            "titulo": info.get('title', '') or '',
+            "descricao": info.get('description', '') or '',
+            "canal": info.get('uploader', '') or '',
+            "duracao": info.get('duration', 0) or 0,
+            "fonte": "yt_dlp"
         }
     except Exception as e:
-        print(f"Erro ao extrair metadados: {e}")
+        print(f"Erro yt-dlp metadata: {e}")
         return {
             "titulo": "",
             "descricao": "",
@@ -98,30 +155,70 @@ async def transcrever(request: URLRequest):
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
 
-            # Extrair metadados do vídeo
+            # Extrair metadados
             descricao_video = ""
             titulo_video = ""
+            canal_video = ""
+
             try:
-                ydl_opts_meta = {
-                    "skip_download": True,
-                    "quiet": True,
-                    "no_warnings": True,
-                }
-                loop = asyncio.get_event_loop()
-                info = await loop.run_in_executor(
-                    None,
-                    lambda: _get_info(url, ydl_opts_meta)
-                )
-                if info:
-                    descricao_video = info.get('description', '') or ''
-                    titulo_video = info.get('title', '') or ''
-                    print(f"Título: {titulo_video}")
-                    print(f"Descrição ({len(descricao_video)} chars)")
+                video_id = _extrair_video_id(url)
+                is_youtube = video_id is not None
+
+                if is_youtube and YOUTUBE_API_KEY:
+                    # YouTube — usar API oficial
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        response = await client.get(
+                            "https://www.googleapis.com/youtube/v3/videos",
+                            params={
+                                "id": video_id,
+                                "part": "snippet",
+                                "key": YOUTUBE_API_KEY
+                            }
+                        )
+                        if response.status_code == 200:
+                            data = response.json()
+                            items = data.get("items", [])
+                            if items:
+                                snippet = items[0].get("snippet", {})
+                                titulo_video = snippet.get("title", "")
+                                descricao_video = snippet.get("description", "")
+                                canal_video = snippet.get("channelTitle", "")
+                                print(f"YouTube API OK — Descrição: {len(descricao_video)} chars")
+                else:
+                    # Outras plataformas — yt-dlp
+                    ydl_opts_meta = {
+                        "skip_download": True,
+                        "quiet": True,
+                        "no_warnings": True,
+                    }
+                    loop = asyncio.get_event_loop()
+                    info = await loop.run_in_executor(
+                        None,
+                        lambda: _get_info(url, ydl_opts_meta)
+                    )
+                    if info:
+                        descricao_video = info.get('description', '') or ''
+                        titulo_video = info.get('title', '') or ''
+                        canal_video = info.get('uploader', '') or ''
+                        print(f"yt-dlp metadata OK — Descrição: {len(descricao_video)} chars")
+
             except Exception as e:
                 print(f"Erro ao extrair metadados: {e}")
 
             # Extrair thumbnail
             thumbnail_base64 = await _extrair_thumbnail(url, tmpdir)
+
+            # Para YouTube — usar thumbnail da API oficial
+            if _extrair_video_id(url) and not thumbnail_base64:
+                vid = _extrair_video_id(url)
+                thumb_url = f"https://img.youtube.com/vi/{vid}/maxresdefault.jpg"
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        r = await client.get(thumb_url)
+                        if r.status_code == 200:
+                            thumbnail_base64 = f"data:image/jpeg;base64,{base64.b64encode(r.content).decode()}"
+                except Exception:
+                    pass
 
             # Download do áudio
             ydl_opts = {
@@ -161,7 +258,6 @@ async def transcrever(request: URLRequest):
                 )
 
             audio_file = os.path.join(tmpdir, mp3_files[0])
-
             file_size = os.path.getsize(audio_file)
             print(f"Tamanho do áudio: {file_size / 1024 / 1024:.1f}MB")
 
@@ -180,6 +276,7 @@ async def transcrever(request: URLRequest):
                 "transcricao": transcricao,
                 "descricao": descricao_video,
                 "titulo": titulo_video,
+                "canal": canal_video,
                 "thumbnail": thumbnail_base64,
                 "plataforma": _detectar_plataforma(url)
             }
